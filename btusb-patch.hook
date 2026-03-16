@@ -1,0 +1,17 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = linux-zen-headers
+Target = linux-lqx-headers
+Target = linux-headers
+Target = linux-lts-headers
+Target = linux-hardened-headers
+Target = linux-rt-headers
+Target = linux-rt-lts-headers
+
+[Action]
+Description = Recompilando módulo btusb parcheado...
+When = PostTransaction
+Exec = /usr/local/bin/install-btusb-patch
+NeedsTargets

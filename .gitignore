@@ -1,0 +1,19 @@
+# Headers internos descargados en tiempo de compilación
+btintel.h
+btbcm.h
+btrtl.h
+btmtk.h
+
+# Artefactos de compilación del módulo
+*.ko
+*.o
+*.mod
+*.mod.c
+*.cmd
+modules.order
+Module.symvers
+.module-common.o
+..module-common.o.cmd
+
+# Directorio de Claude Code
+.claude/
