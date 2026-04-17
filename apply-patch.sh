@@ -15,10 +15,24 @@ KBUILD="/lib/modules/${KVER}/build"
 # ---------------------------------------------------------------------------
 detect_kernel() {
     local kver="$1"
-    local base
+    local base rc_tag
     base=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')
+    # Linus RC tag format: v7.0-rc7  (drops the .0 patch component)
+    rc_tag=$(echo "$kver" | sed -n 's/^\([0-9]*\.[0-9]*\)\.[0-9]*-\(rc[0-9]*\).*/v\1-\2/p')
 
-    if echo "$kver" | grep -q '\-zen'; then
+    if echo "$kver" | grep -qE '\-cachyos(-rc)?'; then
+        HEADERS_PKG="linux-cachyos-headers"
+        if [[ -n "$rc_tag" ]]; then
+            FLAVOR="cachyos-rc"
+            KERNEL_TAG="${rc_tag}-cachyos"
+        else
+            FLAVOR="cachyos"
+            KERNEL_TAG="v${base}-cachyos"
+        fi
+        BASE_URL="https://raw.githubusercontent.com/CachyOS/linux/${KERNEL_TAG}/drivers/bluetooth"
+        FALLBACK_URL="https://raw.githubusercontent.com/torvalds/linux/${rc_tag:-v${base}}/drivers/bluetooth"
+
+    elif echo "$kver" | grep -q '\-zen'; then
         FLAVOR="zen"
         HEADERS_PKG="linux-zen-headers"
         KERNEL_TAG=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(zen[0-9]*\)-.*/v\1-\2/')
@@ -51,7 +65,7 @@ detect_kernel() {
     elif echo "$kver" | grep -q '\-rt'; then
         FLAVOR="rt"
         HEADERS_PKG="linux-rt-headers"
-        KERNEL_TAG="v$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)_.*/\1/')"
+        KERNEL_TAG="v${base}"
         BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${KERNEL_TAG}/drivers/bluetooth"
         FALLBACK_URL="$BASE_URL"
 
@@ -59,9 +73,9 @@ detect_kernel() {
         # linux mainline (arch) u otro sabor desconocido
         FLAVOR="arch"
         HEADERS_PKG="linux-headers"
-        KERNEL_TAG="v${base}"
-        BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${KERNEL_TAG}/drivers/bluetooth"
-        FALLBACK_URL="$BASE_URL"
+        KERNEL_TAG="${rc_tag:-v${base}}"
+        BASE_URL="https://raw.githubusercontent.com/torvalds/linux/${KERNEL_TAG}/drivers/bluetooth"
+        FALLBACK_URL="https://raw.githubusercontent.com/gregkh/linux/${KERNEL_TAG}/drivers/bluetooth"
     fi
 }
 
@@ -112,9 +126,20 @@ fi
 echo "==> Descargando headers bluetooth para ${KERNEL_TAG}..."
 download_bt_headers "${SCRIPT_DIR}"
 
+# --- Detectar compilador (usar el mismo que construyó el kernel) ---
+if grep -q 'clang' /proc/version 2>/dev/null; then
+    KBUILD_CC="clang"
+else
+    KBUILD_CC="gcc"
+fi
+
 # --- Compilar ---
-echo "==> Compilando..."
-make -C "${SCRIPT_DIR}"
+echo "==> Compilando con ${KBUILD_CC}..."
+if [[ "$KBUILD_CC" == "clang" ]]; then
+    make -C "${SCRIPT_DIR}" CC=clang LD=ld.lld
+else
+    make -C "${SCRIPT_DIR}" CC=gcc
+fi
 
 if [[ ! -f "${SCRIPT_DIR}/btusb.ko" ]]; then
     echo "ERROR: La compilación falló."
