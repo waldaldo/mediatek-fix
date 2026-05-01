@@ -1,18 +1,36 @@
-# bluetoothpatch
+# btusb patch — MediaTek Bluetooth USB 04ca:3807 (MT7921) not working on Linux
 
-Out-of-tree Linux kernel module que recompila el driver `btusb` con soporte para un dispositivo MediaTek específico (`USB_DEVICE(0x04ca, 0x3807)`) que no está incluido en el árbol oficial del kernel.
+**Fix for MediaTek Bluetooth adapter `04ca:3807` not recognized by the Linux kernel.**
 
-Incluye integración con **pacman** para recompilación automática al actualizar los headers del kernel.
+This repository provides an out-of-tree kernel module that patches `btusb` to add the missing USB ID entry for the MediaTek MT7921 Bluetooth adapter (`04ca:3807`). The device is not listed in the upstream `btusb` driver table and remains unrecognized on recent kernel versions.
+
+Includes automatic recompilation via a **pacman hook** after every kernel update.
 
 ---
 
-## El problema
+## The problem
 
-El adaptador Bluetooth MediaTek `04ca:3807` no tiene entrada en la tabla de IDs del driver `btusb` del kernel oficial. Sin este parche, el dispositivo no es reconocido y el Bluetooth no funciona.
+If you have a MediaTek Bluetooth adapter with USB ID `04ca:3807` and Bluetooth does not work on Linux, you are likely hitting this bug:
 
-## Solución
+```
+$ lsusb
+Bus 001 Device 004: ID 04ca:3807 Lite-On Technology Corp.
 
-Se recompila `btusb.c` con la entrada añadida:
+$ dmesg | grep -i bluetooth
+# nothing — device not recognized by btusb
+```
+
+The device ID `0x04ca 0x3807` is missing from the `btusb` driver's USB ID table in the official kernel tree. As of kernel 7.x, this entry has still **not been merged upstream**.
+
+**Affected hardware:** laptops and desktops with MediaTek MT7921 Bluetooth (USB form factor), commonly found in ASUS, Lenovo, HP, and Acer models shipping with AMD or Intel platforms.
+
+**Affected distros:** any Linux distro running a kernel without this entry — Arch Linux, Manjaro, CachyOS, EndeavourOS, Ubuntu, Fedora, and others.
+
+---
+
+## The fix
+
+The missing entry is added to `btusb.c`:
 
 ```c
 /* MediaTek MT7921 */
@@ -20,93 +38,93 @@ Se recompila `btusb.c` con la entrada añadida:
   BTUSB_WIDEBAND_SPEECH | BTUSB_VALID_LE_STATES },
 ```
 
-El módulo resultante reemplaza al original del sistema. Un hook de pacman garantiza que el parche se reaaplica automáticamente cada vez que se actualiza el kernel.
+The patched module replaces the system's original `btusb.ko`. A pacman hook ensures the patch is automatically reapplied on every kernel update.
 
 ---
 
-## Kernels soportados
+## Supported kernels
 
-| Sabor | Paquete de headers | Repositorio de fuentes |
+| Kernel flavor | Headers package | Source repository |
 |---|---|---|
+| `linux-cachyos` / `linux-cachyos-rc` | `linux-cachyos-headers` | CachyOS/linux |
 | `linux-zen` | `linux-zen-headers` | zen-kernel/zen-kernel |
 | `linux-lqx` | `linux-lqx-headers` | zen-kernel/zen-kernel |
 | `linux-hardened` | `linux-hardened-headers` | anthraxx/linux-hardened |
 | `linux-lts` | `linux-lts-headers` | gregkh/linux |
 | `linux-rt` / `linux-rt-lts` | `linux-rt-headers` | gregkh/linux |
-| `linux` (mainline Arch) | `linux-headers` | gregkh/linux |
+| `linux` (Arch mainline) | `linux-headers` | torvalds/linux |
 
-Si el tag del sabor no está disponible en su repositorio primario, el script usa `gregkh/linux` como fallback automático.
-
----
-
-## Requisitos
-
-- Arch Linux (o derivado) con pacman
-- Headers del kernel instalados (ver tabla anterior)
-- `curl`, `zstd`, `make`, `gcc`
+If a flavor-specific tag is not available, the script automatically falls back to `torvalds/linux` or `gregkh/linux`.
 
 ---
 
-## Instalación manual
+## Requirements
+
+- Arch Linux or derivative (pacman-based)
+- Kernel headers installed (see table above)
+- `curl`, `zstd`, `make`, `gcc` or `clang`
+
+---
+
+## Manual installation
 
 ```bash
-# Clonar el repositorio
 git clone https://github.com/waldaldo/mediatek-fix.git
-cd bluetoothpatch
+cd mediatek-fix
 
-# Compilar e instalar (requiere root)
+# Compile and install (requires root)
 sudo ./apply-patch.sh
 ```
 
-El script:
-1. Detecta el kernel y sabor en ejecución (`uname -r`)
-2. Verifica que los headers estén instalados
-3. Descarga los headers internos del subsistema bluetooth desde el repositorio fuente correspondiente
-4. Compila el módulo contra el kernel actual
-5. Hace backup del módulo original como `btusb.ko.zst.orig`
-6. Instala el módulo parcheado y reinicia `bluetooth.service`
+The script:
+1. Detects the running kernel and flavor via `uname -r`
+2. Verifies kernel headers are installed
+3. Downloads internal Bluetooth subsystem headers from the matching kernel source repository
+4. Compiles the module against the running kernel
+5. Backs up the original module as `btusb.ko.zst.orig`
+6. Installs the patched module and restarts `bluetooth.service`
 
 ---
 
-## Hook de pacman (recompilación automática)
+## Pacman hook (automatic recompilation)
 
-Instala el hook y el script para que el parche se aplique solo en cada actualización del kernel:
+Install the hook so the patch is reapplied automatically on every kernel update:
 
 ```bash
-# Copiar fuentes a la ruta estándar
+# Copy sources to the standard path
 sudo mkdir -p /usr/local/src/btusb-patch
 sudo cp btusb.c compat.h /usr/local/src/btusb-patch/
 
-# Instalar el script de build
+# Install the build script
 sudo cp install-btusb-patch.sh /usr/local/bin/install-btusb-patch
 sudo chmod +x /usr/local/bin/install-btusb-patch
 
-# Instalar el hook de pacman
+# Install the pacman hook
 sudo mkdir -p /etc/pacman.d/hooks
 sudo cp btusb-patch.hook /etc/pacman.d/hooks/
 ```
 
-A partir de ese momento, al actualizar cualquier paquete `*-headers` soportado, pacman ejecutará `install-btusb-patch` automáticamente.
+After this, every time a supported `*-headers` package is upgraded, pacman will automatically run `install-btusb-patch`.
 
 ---
 
-## Estructura del proyecto
+## Project structure
 
 ```
-bluetoothpatch/
-├── btusb.c                  # Driver btusb parcheado
-├── compat.h                 # Shims de compatibilidad entre versiones del kernel
-├── Makefile                 # Build out-of-tree del módulo
-├── apply-patch.sh           # Script de instalación manual
-├── install-btusb-patch.sh   # Script llamado por el hook de pacman
-└── btusb-patch.hook         # Hook de pacman
+mediatek-fix/
+├── btusb.c                  # Patched btusb driver
+├── compat.h                 # Compatibility shims across kernel versions
+├── Makefile                 # Out-of-tree module build
+├── apply-patch.sh           # Manual installation script
+├── install-btusb-patch.sh   # Script called by the pacman hook
+└── btusb-patch.hook         # Pacman hook definition
 ```
 
-Los headers `btintel.h`, `btbcm.h`, `btrtl.h` y `btmtk.h` se descargan en tiempo de compilación desde el repositorio fuente del kernel correspondiente y no se incluyen en el repositorio.
+The headers `btintel.h`, `btbcm.h`, `btrtl.h`, and `btmtk.h` are downloaded at build time from the matching kernel source repository and are not included in this repo.
 
 ---
 
-## Restaurar el módulo original
+## Restore the original module
 
 ```bash
 KVER=$(uname -r)
@@ -115,3 +133,16 @@ sudo cp "${DEST}/btusb.ko.zst.orig" "${DEST}/btusb.ko.zst"
 sudo depmod -a
 sudo systemctl restart bluetooth
 ```
+
+---
+
+## Related searches
+
+- `04ca:3807` bluetooth not working linux
+- MediaTek MT7921 bluetooth linux fix
+- btusb missing USB ID 04ca 3807
+- Bluetooth adapter not recognized Arch Linux
+- btusb out-of-tree module patch kernel 6.x 7.x
+- MediaTek bluetooth `lsusb` shows device but not connected
+- `hciconfig` no devices found MediaTek
+- Lite-On Technology Corp bluetooth linux driver

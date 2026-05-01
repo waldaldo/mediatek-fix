@@ -17,15 +17,17 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 # ---------------------------------------------------------------------------
 detect_kernel() {
     local kver="$1"
-    local base
+    local base base_mm
     base=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')
+    base_mm=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\)\..*/\1/')
 
     if echo "$kver" | grep -q '\-zen'; then
         FLAVOR="zen"
         HEADERS_PKG="linux-zen-headers"
         KERNEL_TAG=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(zen[0-9]*\)-.*/v\1-\2/')
         BASE_URL="https://raw.githubusercontent.com/zen-kernel/zen-kernel/${KERNEL_TAG}/drivers/bluetooth"
-        FALLBACK_URL="https://raw.githubusercontent.com/torvalds/linux/v${base}/drivers/bluetooth"
+        # torvalds tagea vX.Y (sin patch level)
+        FALLBACK_URL="https://raw.githubusercontent.com/torvalds/linux/v${base_mm}/drivers/bluetooth"
 
     elif echo "$kver" | grep -q '\-lqx'; then
         FLAVOR="lqx"
