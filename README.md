@@ -35,7 +35,7 @@ The missing entry is added to `btusb.c`:
 ```c
 /* MediaTek MT7921 */
 { USB_DEVICE(0x04ca, 0x3807), .driver_info = BTUSB_MEDIATEK |
-  BTUSB_WIDEBAND_SPEECH | BTUSB_VALID_LE_STATES },
+  BTUSB_WIDEBAND_SPEECH },
 ```
 
 The patched module replaces the system's original `btusb.ko`. A pacman hook ensures the patch is automatically reapplied on every kernel update.

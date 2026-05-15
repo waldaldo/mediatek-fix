@@ -2,6 +2,8 @@
 Operation = Install
 Operation = Upgrade
 Type = Package
+Target = linux-cachyos-headers
+Target = linux-cachyos-rc-headers
 Target = linux-zen-headers
 Target = linux-lqx-headers
 Target = linux-headers

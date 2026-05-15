@@ -1,162 +1,305 @@
 #!/bin/bash
 # install-btusb-patch.sh
-# Compila e instala el módulo btusb parcheado para el kernel actual.
-# Se ejecuta automáticamente via pacman hook al actualizar los headers del kernel.
+# Compila e instala el módulo btusb parcheado para el kernel en ejecución.
+# Compatible con cualquier distribución Linux.
+#
+#   Manual (desde el repo):  sudo ./apply-patch.sh
+#                             sudo ./install-btusb-patch.sh
+#   Hook de pacman:          /usr/local/bin/install-btusb-patch
 
 set -euo pipefail
 
 KVER=$(uname -r)
-KBUILD="/lib/modules/${KVER}/build"
-SRC="/usr/local/src/btusb-patch"
+
+# Si el script está junto a btusb.c, usa ese directorio como fuente.
+# Si no, usa la ruta de instalación del sistema.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/btusb.c" ]]; then
+    SRC="${SCRIPT_DIR}"
+else
+    SRC="/usr/local/src/btusb-patch"
+fi
+
 BUILD_DIR=$(mktemp -d /tmp/btusb-build.XXXXXX)
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
 # ---------------------------------------------------------------------------
-# Detectar sabor del kernel, tag del repositorio y URL base de headers BT.
-# Exporta: FLAVOR, HEADERS_PKG, KERNEL_TAG, BASE_URL, FALLBACK_URL
+# Localiza el directorio de build del kernel en varias rutas estándar.
+# Salida: ruta al directorio de headers del kernel, o vacío si no se encuentra.
 # ---------------------------------------------------------------------------
-detect_kernel() {
+find_kbuild() {
     local kver="$1"
-    local base base_mm
-    base=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')
-    base_mm=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\)\..*/\1/')
+    local candidates=(
+        "/lib/modules/${kver}/build"        # Arch, openSUSE y mayoría de distros
+        "/usr/src/linux-headers-${kver}"    # Debian / Ubuntu
+        "/usr/src/kernels/${kver}"          # Fedora / RHEL / CentOS
+        "/usr/src/linux-${kver}"            # Gentoo
+    )
+    for path in "${candidates[@]}"; do
+        if [[ -d "$path" && -f "${path}/Makefile" ]]; then
+            echo "$path"
+            return 0
+        fi
+    done
+    return 1
+}
 
-    if echo "$kver" | grep -q '\-zen'; then
-        FLAVOR="zen"
-        HEADERS_PKG="linux-zen-headers"
-        KERNEL_TAG=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(zen[0-9]*\)-.*/v\1-\2/')
-        BASE_URL="https://raw.githubusercontent.com/zen-kernel/zen-kernel/${KERNEL_TAG}/drivers/bluetooth"
-        # torvalds tagea vX.Y (sin patch level)
-        FALLBACK_URL="https://raw.githubusercontent.com/torvalds/linux/v${base_mm}/drivers/bluetooth"
-
-    elif echo "$kver" | grep -q '\-lqx'; then
-        FLAVOR="lqx"
-        HEADERS_PKG="linux-lqx-headers"
-        KERNEL_TAG=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(lqx[0-9]*\)-.*/v\1-\2/')
-        # lqx comparte repo con zen-kernel
-        BASE_URL="https://raw.githubusercontent.com/zen-kernel/zen-kernel/${KERNEL_TAG}/drivers/bluetooth"
-        FALLBACK_URL="https://raw.githubusercontent.com/gregkh/linux/v${base}/drivers/bluetooth"
-
-    elif echo "$kver" | grep -q '\.hardened'; then
-        FLAVOR="hardened"
-        HEADERS_PKG="linux-hardened-headers"
-        # uname: 6.14.0.hardened1-1-hardened → tag GitHub: v6.14.0-hardened1
-        KERNEL_TAG=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)\.\(hardened[0-9]*\)-.*/v\1-\2/')
-        BASE_URL="https://raw.githubusercontent.com/anthraxx/linux-hardened/${KERNEL_TAG}/drivers/bluetooth"
-        FALLBACK_URL="https://raw.githubusercontent.com/gregkh/linux/v${base}/drivers/bluetooth"
-
-    elif echo "$kver" | grep -q '\-lts'; then
-        FLAVOR="lts"
-        HEADERS_PKG="linux-lts-headers"
-        KERNEL_TAG="v${base}"
-        BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${KERNEL_TAG}/drivers/bluetooth"
-        FALLBACK_URL="$BASE_URL"
-
-    elif echo "$kver" | grep -q '\-rt'; then
-        FLAVOR="rt"
-        HEADERS_PKG="linux-rt-headers"
-        KERNEL_TAG="v$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)_.*/\1/')"
-        BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${KERNEL_TAG}/drivers/bluetooth"
-        FALLBACK_URL="$BASE_URL"
-
+# ---------------------------------------------------------------------------
+# Sugiere el paquete de headers correcto según el gestor de paquetes presente.
+# ---------------------------------------------------------------------------
+suggest_headers_pkg() {
+    local kver="$1"
+    if command -v pacman &>/dev/null; then
+        echo "el paquete *-headers correspondiente a tu kernel (ej: linux-headers)"
+    elif command -v apt-get &>/dev/null; then
+        echo "linux-headers-${kver}"
+    elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+        echo "kernel-devel-${kver}"
+    elif command -v zypper &>/dev/null; then
+        echo "kernel-devel"
+    elif command -v emerge &>/dev/null; then
+        echo "sys-kernel/linux-headers"
     else
-        FLAVOR="arch"
-        HEADERS_PKG="linux-headers"
-        KERNEL_TAG="v${base}"
-        BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${KERNEL_TAG}/drivers/bluetooth"
-        FALLBACK_URL="$BASE_URL"
+        echo "el paquete de headers del kernel de tu distribución"
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Construye la lista ordenada de URLs donde buscar los headers bluetooth.
+# Empieza por el repo específico del sabor del kernel, termina en upstream.
+# Exporta: FLAVOR, URL_CANDIDATES[]
+# ---------------------------------------------------------------------------
+build_url_candidates() {
+    local kver="$1"
+    local base base_mm rc_tag
+    base=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')
+    base_mm=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\)\..*/\1/')
+    rc_tag=$(echo "$kver" | sed -n 's/^\([0-9]*\.[0-9]*\)\.[0-9]*-\(rc[0-9]*\).*/v\1-\2/p')
+
+    URL_CANDIDATES=()
+    FLAVOR="generic"
+
+    # --- Sabores conocidos: añaden su repo específico al frente de la lista ---
+
+    if echo "$kver" | grep -qE '\-cachyos(-rc)?'; then
+        FLAVOR="cachyos"
+        local ctag
+        [[ -n "$rc_tag" ]] && ctag="${rc_tag}-cachyos" || ctag="v${base}-cachyos"
+        URL_CANDIDATES+=("https://raw.githubusercontent.com/CachyOS/linux/${ctag}/drivers/bluetooth")
+
+    elif echo "$kver" | grep -q '\-zen'; then
+        FLAVOR="zen"
+        local ztag
+        ztag=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(zen[0-9]*\)-.*/v\1-\2/')
+        URL_CANDIDATES+=("https://raw.githubusercontent.com/zen-kernel/zen-kernel/${ztag}/drivers/bluetooth")
+
+    elif echo "$kver" | grep -q '\-lqx'; then
+        FLAVOR="lqx"
+        local ltag
+        ltag=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(lqx[0-9]*\)-.*/v\1-\2/')
+        URL_CANDIDATES+=("https://raw.githubusercontent.com/zen-kernel/zen-kernel/${ltag}/drivers/bluetooth")
+
+    elif echo "$kver" | grep -q '\.hardened'; then
+        FLAVOR="hardened"
+        local htag
+        htag=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)\.\(hardened[0-9]*\)-.*/v\1-\2/')
+        URL_CANDIDATES+=("https://raw.githubusercontent.com/anthraxx/linux-hardened/${htag}/drivers/bluetooth")
+    fi
+
+    # --- Upstream siempre disponible como fallback ---
+
+    # torvalds/linux: tagea vX.Y (sin patch level) o vX.Y-rcN para RCs
+    local torvalds_tag="${rc_tag:-v${base_mm}}"
+    URL_CANDIDATES+=("https://raw.githubusercontent.com/torvalds/linux/${torvalds_tag}/drivers/bluetooth")
+
+    # gregkh/linux: estable con patch level completo (vX.Y.Z)
+    local gregkh_tag="${rc_tag:-v${base}}"
+    URL_CANDIDATES+=("https://raw.githubusercontent.com/gregkh/linux/${gregkh_tag}/drivers/bluetooth")
+}
+
+# ---------------------------------------------------------------------------
 # Descarga los cuatro headers internos del subsistema bluetooth.
-# Usa FALLBACK_URL si el primario falla (solo si son distintos).
+# Prueba cada URL de URL_CANDIDATES en orden hasta encontrar una que funcione.
+# ---------------------------------------------------------------------------
 download_bt_headers() {
     local dest="$1"
     for header in btintel.h btbcm.h btrtl.h btmtk.h; do
         echo "    -> ${header}"
-        if ! curl -sSf "${BASE_URL}/${header}" -o "${dest}/${header}" 2>/dev/null; then
-            if [[ "$FALLBACK_URL" != "$BASE_URL" ]]; then
-                echo "       WARN: fallo ${BASE_URL}, usando fallback ${FALLBACK_URL}..."
-                curl -sSf "${FALLBACK_URL}/${header}" -o "${dest}/${header}" || {
-                    echo "ERROR: No se pudo descargar ${header}"
-                    exit 1
-                }
-            else
-                echo "ERROR: No se pudo descargar ${header} desde ${BASE_URL}"
-                exit 1
+        local ok=0
+        for url in "${URL_CANDIDATES[@]}"; do
+            if curl -sSf "${url}/${header}" -o "${dest}/${header}" 2>/dev/null; then
+                ok=1
+                break
             fi
+            echo "       WARN: fallo ${url}"
+        done
+        if [[ $ok -eq 0 ]]; then
+            echo "ERROR: No se pudo descargar ${header} desde ninguna fuente conocida."
+            exit 1
         fi
     done
 }
 
-# --- Detectar kernel ---
-detect_kernel "$KVER"
-echo "==> Compilando btusb parcheado para kernel ${KVER} (sabor: ${FLAVOR}, tag: ${KERNEL_TAG})"
-
-# --- Verificar headers del kernel ---
-if [[ ! -d "$KBUILD" ]]; then
-    echo "ERROR: Headers del kernel no encontrados en $KBUILD"
-    echo "       Instala ${HEADERS_PKG} antes de continuar."
-    exit 1
-fi
-
-# --- Generar autoconf.h si falta ---
-if [[ ! -f "${KBUILD}/include/generated/autoconf.h" ]]; then
-    echo "==> Generando autoconf.h desde /proc/config.gz..."
-    if [[ ! -f /proc/config.gz ]]; then
-        echo "ERROR: /proc/config.gz no disponible."
+# ---------------------------------------------------------------------------
+# Genera autoconf.h a partir de la configuración del kernel.
+# Busca en /proc/config.gz, /boot/config-KVER y KBUILD/.config.
+# ---------------------------------------------------------------------------
+generate_autoconf() {
+    local kbuild="$1" kver="$2"
+    echo "==> Generando autoconf.h..."
+    local config_cmd=""
+    if [[ -f /proc/config.gz ]]; then
+        config_cmd="zcat /proc/config.gz"
+    elif [[ -f "/boot/config-${kver}" ]]; then
+        config_cmd="cat /boot/config-${kver}"
+    elif [[ -f "${kbuild}/.config" ]]; then
+        config_cmd="cat ${kbuild}/.config"
+    else
+        echo "ERROR: No se encontró la configuración del kernel."
+        echo "       Prueba: zcat /proc/config.gz, /boot/config-${kver} o ${kbuild}/.config"
         exit 1
     fi
-    zcat /proc/config.gz | awk '
+    eval "$config_cmd" | awk '
         /^CONFIG_.*=y$/ { gsub(/=y$/, ""); print "#define " $0 " 1" }
         /^CONFIG_.*=m$/ { gsub(/=m$/, ""); print "#define " $0 " 1" }
         /^CONFIG_.*=[0-9]/ { gsub(/=/, " "); print "#define " $0 }
         /^CONFIG_.*=".*"/ { n=index($0,"="); print "#define " substr($0,1,n-1) " " substr($0,n+1) }
-    ' > "${KBUILD}/include/generated/autoconf.h"
-fi
+    ' > "${kbuild}/include/generated/autoconf.h"
+}
 
-# --- Copiar fuentes al directorio de build temporal ---
-cp "${SRC}/btusb.c" "${BUILD_DIR}/"
-cp "${SRC}/compat.h" "${BUILD_DIR}/"
+# ---------------------------------------------------------------------------
+# Detecta el compilador con el que fue construido el kernel.
+# ---------------------------------------------------------------------------
+detect_compiler() {
+    local kbuild="$1"
+    # La cabecera compile.h registra el compilador exacto usado en el build
+    if grep -q 'clang' "${kbuild}/include/generated/compile.h" 2>/dev/null; then
+        echo "clang"
+    elif grep -q 'clang' /proc/version 2>/dev/null; then
+        echo "clang"
+    else
+        echo "gcc"
+    fi
+}
 
-# --- Descargar headers internos del subsistema bluetooth ---
-echo "==> Descargando headers bluetooth desde ${FLAVOR} ${KERNEL_TAG}..."
-download_bt_headers "${BUILD_DIR}"
+# ---------------------------------------------------------------------------
+# Detecta la extensión del módulo btusb instalado (zst, xz, gz, o sin comprimir).
+# ---------------------------------------------------------------------------
+detect_module_ext() {
+    local dest="$1"
+    for ext in ko.zst ko.xz ko.gz ko; do
+        [[ -f "${dest}/btusb.${ext}" ]] && echo "$ext" && return 0
+    done
+    echo "ko"
+}
 
-# --- Crear Makefile ---
-cat > "${BUILD_DIR}/Makefile" << 'EOF'
+# ---------------------------------------------------------------------------
+# Instala btusb.ko con la compresión correcta y hace backup del original.
+# ---------------------------------------------------------------------------
+install_module() {
+    local ko_src="$1" dest="$2" kver="$3"
+    local ext orig
+    ext=$(detect_module_ext "$dest")
+    orig="${dest}/btusb.${ext}.orig"
+
+    [[ ! -f "$orig" ]] && cp "${dest}/btusb.${ext}" "$orig" && echo "    Backup: ${orig}"
+
+    case "$ext" in
+        ko.zst) zstd -f "$ko_src" -o "${dest}/btusb.ko.zst" ;;
+        ko.xz)  xz -f -k "$ko_src" && mv "${ko_src}.xz" "${dest}/btusb.ko.xz" ;;
+        ko.gz)  gzip -f -k "$ko_src" && mv "${ko_src}.gz" "${dest}/btusb.ko.gz" ;;
+        ko)     cp "$ko_src" "${dest}/btusb.ko" ;;
+    esac
+
+    depmod -a "$kver"
+}
+
+# ---------------------------------------------------------------------------
+# Reinicia el servicio bluetooth usando el init system disponible.
+# ---------------------------------------------------------------------------
+restart_bluetooth() {
+    if command -v systemctl &>/dev/null; then
+        systemctl restart bluetooth 2>/dev/null || true
+    elif command -v rc-service &>/dev/null; then
+        rc-service bluetooth restart 2>/dev/null || true
+    elif command -v service &>/dev/null; then
+        service bluetooth restart 2>/dev/null || true
+    fi
+}
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+main() {
+    # --- Localizar headers del kernel ---
+    KBUILD=$(find_kbuild "$KVER") || {
+        echo "ERROR: Headers del kernel no encontrados para ${KVER}."
+        echo "       Instala: $(suggest_headers_pkg "$KVER")"
+        exit 1
+    }
+
+    # --- Construir lista de URLs para los headers bluetooth ---
+    build_url_candidates "$KVER"
+    echo "==> Kernel: ${KVER} (sabor: ${FLAVOR})"
+    echo "==> Headers: ${KBUILD}"
+    echo "==> Fuente:  ${SRC}"
+
+    # --- Verificar fuentes ---
+    if [[ ! -f "${SRC}/btusb.c" || ! -f "${SRC}/compat.h" ]]; then
+        echo "ERROR: Fuentes no encontradas en ${SRC}"
+        echo "       Copia btusb.c y compat.h a ${SRC} o ejecuta desde el repositorio."
+        exit 1
+    fi
+
+    # --- Generar autoconf.h si falta ---
+    if [[ ! -f "${KBUILD}/include/generated/autoconf.h" ]]; then
+        generate_autoconf "$KBUILD" "$KVER"
+    fi
+
+    # --- Preparar build temporal ---
+    cp "${SRC}/btusb.c" "${BUILD_DIR}/"
+    cp "${SRC}/compat.h" "${BUILD_DIR}/"
+
+    # --- Descargar headers internos del subsistema bluetooth ---
+    echo "==> Descargando headers bluetooth..."
+    download_bt_headers "${BUILD_DIR}"
+
+    # --- Crear Makefile con la ruta correcta de headers ---
+    cat > "${BUILD_DIR}/Makefile" << EOF
 obj-m := btusb.o
-KDIR := /lib/modules/$(shell uname -r)/build
-EXTRA_CFLAGS := -I$(PWD) -include $(PWD)/compat.h
+KDIR := ${KBUILD}
+EXTRA_CFLAGS := -I\$(CURDIR) -include \$(CURDIR)/compat.h
 
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	\$(MAKE) -C \$(KDIR) M=\$(CURDIR) modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	\$(MAKE) -C \$(KDIR) M=\$(CURDIR) clean
 EOF
 
-# --- Compilar ---
-echo "==> Compilando..."
-make -C "${BUILD_DIR}" 2>&1
+    # --- Detectar compilador y compilar ---
+    KBUILD_CC=$(detect_compiler "$KBUILD")
+    echo "==> Compilando con ${KBUILD_CC}..."
+    if [[ "$KBUILD_CC" == "clang" ]]; then
+        make -C "${BUILD_DIR}" CC=clang LD=ld.lld
+    else
+        make -C "${BUILD_DIR}" CC=gcc
+    fi
 
-if [[ ! -f "${BUILD_DIR}/btusb.ko" ]]; then
-    echo "ERROR: La compilación falló, btusb.ko no generado."
-    exit 1
-fi
+    [[ ! -f "${BUILD_DIR}/btusb.ko" ]] && { echo "ERROR: La compilación falló."; exit 1; }
 
-# --- Instalar ---
-echo "==> Instalando btusb.ko..."
-DEST="/lib/modules/${KVER}/kernel/drivers/bluetooth"
+    # --- Instalar ---
+    echo "==> Instalando btusb.ko..."
+    DEST="/lib/modules/${KVER}/kernel/drivers/bluetooth"
+    install_module "${BUILD_DIR}/btusb.ko" "$DEST" "$KVER"
 
-# Hacer backup del módulo original (solo la primera vez)
-if [[ ! -f "${DEST}/btusb.ko.zst.orig" ]]; then
-    cp "${DEST}/btusb.ko.zst" "${DEST}/btusb.ko.zst.orig"
-    echo "    Backup guardado en btusb.ko.zst.orig"
-fi
+    # --- Reiniciar bluetooth ---
+    echo "==> Reiniciando bluetooth..."
+    restart_bluetooth
 
-zstd -f "${BUILD_DIR}/btusb.ko" -o "${DEST}/btusb.ko.zst"
-depmod -a "${KVER}"
+    echo "==> Listo."
+}
 
-echo "==> Listo. Reinicia el servicio bluetooth para aplicar los cambios:"
-echo "    systemctl restart bluetooth"
+# Permite hacer `source install-btusb-patch.sh` en tests sin ejecutar main.
+[[ "${BTUSB_TESTING:-}" == "1" ]] || main
