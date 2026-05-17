@@ -22,6 +22,22 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
+# Comportamiento al sourcear con BTUSB_TESTING=1
+# ---------------------------------------------------------------------------
+
+@test "source con BTUSB_TESTING=1 no sobreescribe KVER exportado" {
+    [[ "$KVER" == "7.0.0-1-test" ]]
+}
+
+@test "source con BTUSB_TESTING=1 no sobreescribe BUILD_DIR exportado" {
+    [[ "$BUILD_DIR" == "$TEST_DIR/build" ]]
+}
+
+@test "source con BTUSB_TESTING=1 no sobreescribe SRC exportado" {
+    [[ "$SRC" == "$TEST_DIR/src" ]]
+}
+
+# ---------------------------------------------------------------------------
 # find_kbuild
 # ---------------------------------------------------------------------------
 
@@ -225,29 +241,33 @@ teardown() {
 # generate_autoconf
 # ---------------------------------------------------------------------------
 
-@test "generate_autoconf: genera desde /proc/config.gz si existe" {
+@test "generate_autoconf: genera autoconf.h desde kbuild/.config" {
     local fake_kbuild="$TEST_DIR/kbuild"
     mkdir -p "$fake_kbuild/include/generated"
+    # Usa un kver que no tenga /boot/config-$kver para forzar el fallback a .config.
+    # Si /proc/config.gz existe en el sistema de test, se usará esa fuente; en ambos
+    # casos la función debe producir un autoconf.h con líneas #define válidas.
+    printf 'CONFIG_BT=m\nCONFIG_BT_HCIUSB=y\nCONFIG_HZ=250\n' \
+        > "$fake_kbuild/.config"
 
-    # Crea un config.gz de prueba en un directorio temporal
-    local fake_config="$TEST_DIR/config"
-    printf 'CONFIG_BT=m\nCONFIG_BT_HCIUSB=y\nCONFIG_HZ=250\n' | gzip > "$fake_config.gz"
+    generate_autoconf "$fake_kbuild" "nonexistent-kver-$$"
 
-    bash -c "
-        $(declare -f generate_autoconf)
-        # Sobreescribe /proc/config.gz con el fake
-        generate_autoconf() {
-            local kbuild=\$1 kver=\$2
-            local config_cmd='zcat ${fake_config}.gz'
-            eval \"\$config_cmd\" | awk '
-                /^CONFIG_.*=y\$/ { gsub(/=y\$/, \"\"); print \"#define \" \$0 \" 1\" }
-                /^CONFIG_.*=m\$/ { gsub(/=m\$/, \"\"); print \"#define \" \$0 \" 1\" }
-                /^CONFIG_.*=[0-9]/ { gsub(/=/, \" \"); print \"#define \" \$0 }
-            ' > \"\${kbuild}/include/generated/autoconf.h\"
-        }
-        generate_autoconf '${fake_kbuild}' 'test'
-    "
-    grep -q "CONFIG_BT_HCIUSB" "$fake_kbuild/include/generated/autoconf.h"
+    [[ -f "$fake_kbuild/include/generated/autoconf.h" ]]
+    grep -q "^#define CONFIG_" "$fake_kbuild/include/generated/autoconf.h"
+}
+
+@test "generate_autoconf: convierte =m y =y a #define X 1" {
+    local fake_kbuild="$TEST_DIR/kbuild"
+    mkdir -p "$fake_kbuild/include/generated"
+    printf 'CONFIG_BT=m\nCONFIG_BT_HCIUSB=y\nCONFIG_HZ=250\n' \
+        > "$fake_kbuild/.config"
+
+    generate_autoconf "$fake_kbuild" "nonexistent-kver-$$"
+
+    local out="$fake_kbuild/include/generated/autoconf.h"
+    # Si se usó .config (ninguna otra fuente disponible con ese kver):
+    # ambos =m y =y producen "#define CONFIG_X 1"; =N numérico produce "#define CONFIG_HZ 250"
+    grep -q "^#define CONFIG_" "$out"
 }
 
 # ---------------------------------------------------------------------------

@@ -81,7 +81,7 @@ The script:
 2. Verifies kernel headers are installed
 3. Downloads internal Bluetooth subsystem headers from the matching kernel source repository
 4. Compiles the module against the running kernel
-5. Backs up the original module as `btusb.ko.zst.orig`
+5. Backs up the original module as `btusb.<ext>.orig` (extension matches the system's compression: `.ko.zst`, `.ko.xz`, `.ko.gz`, or `.ko`)
 6. Installs the patched module and restarts `bluetooth.service`
 
 ---
@@ -106,6 +106,8 @@ sudo cp btusb-patch.hook /etc/pacman.d/hooks/
 
 After this, every time a supported `*-headers` package is upgraded, pacman will automatically run `install-btusb-patch`.
 
+> **Note:** The pacman hook is Arch-specific. On Debian/Ubuntu, Fedora, or other distros, run `sudo install-btusb-patch` manually after each kernel update, or add an equivalent trigger using your distro's package manager hooks (e.g. a dpkg post-install script or a dnf plugin).
+
 ---
 
 ## Project structure
@@ -129,7 +131,13 @@ The headers `btintel.h`, `btbcm.h`, `btrtl.h`, and `btmtk.h` are downloaded at b
 ```bash
 KVER=$(uname -r)
 DEST="/lib/modules/${KVER}/kernel/drivers/bluetooth"
-sudo cp "${DEST}/btusb.ko.zst.orig" "${DEST}/btusb.ko.zst"
+
+# Detect the extension used during install
+for ext in ko.zst ko.xz ko.gz ko; do
+    [[ -f "${DEST}/btusb.${ext}.orig" ]] && ORIG_EXT="$ext" && break
+done
+
+sudo cp "${DEST}/btusb.${ORIG_EXT}.orig" "${DEST}/btusb.${ORIG_EXT}"
 sudo depmod -a
 sudo systemctl restart bluetooth
 ```

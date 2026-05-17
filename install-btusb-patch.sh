@@ -9,19 +9,23 @@
 
 set -euo pipefail
 
-KVER=$(uname -r)
+# Cuando se sourcea para tests (BTUSB_TESTING=1), las variables de entorno
+# exportadas por el harness de tests no deben ser sobreescritas.
+if [[ "${BTUSB_TESTING:-}" != "1" ]]; then
+    KVER=$(uname -r)
 
-# Si el script está junto a btusb.c, usa ese directorio como fuente.
-# Si no, usa la ruta de instalación del sistema.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${SCRIPT_DIR}/btusb.c" ]]; then
-    SRC="${SCRIPT_DIR}"
-else
-    SRC="/usr/local/src/btusb-patch"
+    # Si el script está junto a btusb.c, usa ese directorio como fuente.
+    # Si no, usa la ruta de instalación del sistema.
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -f "${SCRIPT_DIR}/btusb.c" ]]; then
+        SRC="${SCRIPT_DIR}"
+    else
+        SRC="/usr/local/src/btusb-patch"
+    fi
+
+    BUILD_DIR=$(mktemp -d /tmp/btusb-build.XXXXXX)
+    trap 'rm -rf "$BUILD_DIR"' EXIT
 fi
-
-BUILD_DIR=$(mktemp -d /tmp/btusb-build.XXXXXX)
-trap 'rm -rf "$BUILD_DIR"' EXIT
 
 # ---------------------------------------------------------------------------
 # Localiza el directorio de build del kernel en varias rutas estándar.
@@ -127,7 +131,7 @@ download_bt_headers() {
         echo "    -> ${header}"
         local ok=0
         for url in "${URL_CANDIDATES[@]}"; do
-            if curl -sSf "${url}/${header}" -o "${dest}/${header}" 2>/dev/null; then
+            if curl -sSf --max-time 30 "${url}/${header}" -o "${dest}/${header}" 2>/dev/null; then
                 ok=1
                 break
             fi
@@ -147,19 +151,20 @@ download_bt_headers() {
 generate_autoconf() {
     local kbuild="$1" kver="$2"
     echo "==> Generando autoconf.h..."
-    local config_cmd=""
+    local cfg_file="" cfg_zcat=0
     if [[ -f /proc/config.gz ]]; then
-        config_cmd="zcat /proc/config.gz"
+        cfg_file="/proc/config.gz"
+        cfg_zcat=1
     elif [[ -f "/boot/config-${kver}" ]]; then
-        config_cmd="cat /boot/config-${kver}"
+        cfg_file="/boot/config-${kver}"
     elif [[ -f "${kbuild}/.config" ]]; then
-        config_cmd="cat ${kbuild}/.config"
+        cfg_file="${kbuild}/.config"
     else
         echo "ERROR: No se encontró la configuración del kernel."
         echo "       Prueba: zcat /proc/config.gz, /boot/config-${kver} o ${kbuild}/.config"
         exit 1
     fi
-    eval "$config_cmd" | awk '
+    { [[ $cfg_zcat -eq 1 ]] && zcat "$cfg_file" || cat "$cfg_file"; } | awk '
         /^CONFIG_.*=y$/ { gsub(/=y$/, ""); print "#define " $0 " 1" }
         /^CONFIG_.*=m$/ { gsub(/=m$/, ""); print "#define " $0 " 1" }
         /^CONFIG_.*=[0-9]/ { gsub(/=/, " "); print "#define " $0 }
@@ -202,7 +207,14 @@ install_module() {
     ext=$(detect_module_ext "$dest")
     orig="${dest}/btusb.${ext}.orig"
 
-    [[ ! -f "$orig" ]] && cp "${dest}/btusb.${ext}" "$orig" && echo "    Backup: ${orig}"
+    if [[ ! -f "$orig" ]]; then
+        if [[ -f "${dest}/btusb.${ext}" ]]; then
+            cp "${dest}/btusb.${ext}" "$orig"
+            echo "    Backup: ${orig}"
+        else
+            echo "    WARN: No existe ${dest}/btusb.${ext}; se omite backup (instalación nueva)."
+        fi
+    fi
 
     case "$ext" in
         ko.zst) zstd -f "$ko_src" -o "${dest}/btusb.ko.zst" ;;
