@@ -41,23 +41,14 @@ teardown() {
 # find_kbuild
 # ---------------------------------------------------------------------------
 
-@test "find_kbuild: encuentra /lib/modules/{kver}/build" {
+@test "find_kbuild: encuentra directorio válido vía KBUILD_CANDIDATES" {
     local fake="/tmp/bats-kbuild-$$"
     mkdir -p "$fake"
     touch "$fake/Makefile"
-    # Reemplaza la primera ruta candidata con la fake
-    result=$(KVER="fake-kver" bash -c "
-        find_kbuild() {
-            local kver=\$1
-            local candidates=('${fake}')
-            for p in \"\${candidates[@]}\"; do
-                [[ -d \$p && -f \$p/Makefile ]] && echo \$p && return 0
-            done
-            return 1
-        }
-        find_kbuild fake-kver
-    ")
+    KBUILD_CANDIDATES=("$fake")
+    result=$(find_kbuild "fake-kver")
     rm -rf "$fake"
+    unset KBUILD_CANDIDATES
     [[ "$result" == "$fake" ]]
 }
 
@@ -327,4 +318,87 @@ teardown() {
 
     run download_bt_headers "$BUILD_DIR"
     [[ "$status" -ne 0 ]]
+}
+
+@test "download_bt_headers: WARN de URL fallida va a stderr" {
+    URL_CANDIDATES=("http://mock-fail" "http://mock-ok")
+
+    curl() {
+        local url dest
+        while [[ $# -gt 0 ]]; do
+            [[ "$1" == "-o" ]] && dest="$2"
+            [[ "$1" != -* && "$1" == http* ]] && url="$1"
+            shift
+        done
+        [[ "$url" == *"mock-fail"* ]] && return 1
+        echo "/* ok */" > "$dest"
+    }
+    export -f curl
+
+    stderr_out=$(download_bt_headers "$BUILD_DIR" 2>&1 >/dev/null) || true
+    [[ "$stderr_out" == *"WARN"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# install_module
+# ---------------------------------------------------------------------------
+
+@test "install_module: instala .ko sin compresión y hace backup" {
+    local fake_dest="$TEST_DIR/bluetooth"
+    mkdir -p "$fake_dest"
+    echo "modulo-original" > "$fake_dest/btusb.ko"
+    echo "modulo-parcheado" > "$BUILD_DIR/btusb.ko"
+
+    depmod() { :; }
+
+    install_module "$BUILD_DIR/btusb.ko" "$fake_dest" "test-kver"
+
+    [[ -f "$fake_dest/btusb.ko.orig" ]]
+    grep -q "modulo-original" "$fake_dest/btusb.ko.orig"
+    grep -q "modulo-parcheado" "$fake_dest/btusb.ko"
+}
+
+@test "install_module: no sobreescribe backup existente" {
+    local fake_dest="$TEST_DIR/bluetooth"
+    mkdir -p "$fake_dest"
+    echo "backup-original" > "$fake_dest/btusb.ko.orig"
+    echo "ya-parcheado" > "$fake_dest/btusb.ko"
+    echo "nueva-version" > "$BUILD_DIR/btusb.ko"
+
+    depmod() { :; }
+
+    install_module "$BUILD_DIR/btusb.ko" "$fake_dest" "test-kver"
+
+    grep -q "backup-original" "$fake_dest/btusb.ko.orig"
+    grep -q "nueva-version" "$fake_dest/btusb.ko"
+}
+
+@test "install_module: instalación nueva sin módulo previo no falla" {
+    local fake_dest="$TEST_DIR/bluetooth"
+    mkdir -p "$fake_dest"
+    echo "modulo-nuevo" > "$BUILD_DIR/btusb.ko"
+
+    depmod() { :; }
+
+    run install_module "$BUILD_DIR/btusb.ko" "$fake_dest" "test-kver"
+    [[ "$status" -eq 0 ]]
+    [[ -f "$fake_dest/btusb.ko" ]]
+}
+
+# ---------------------------------------------------------------------------
+# restart_bluetooth
+# ---------------------------------------------------------------------------
+
+@test "restart_bluetooth: invoca systemctl restart bluetooth" {
+    local fake_bin="$TEST_DIR/fakebin"
+    local calls_log="$TEST_DIR/calls.log"
+    mkdir -p "$fake_bin"
+    cat > "$fake_bin/systemctl" << 'FAKESCRIPT'
+#!/bin/bash
+echo "$*" >> "${CALLS_LOG}"
+FAKESCRIPT
+    chmod +x "$fake_bin/systemctl"
+    CALLS_LOG="$calls_log" PATH="$fake_bin:$PATH" restart_bluetooth
+
+    grep -q "restart bluetooth" "$calls_log"
 }

@@ -33,12 +33,18 @@ fi
 # ---------------------------------------------------------------------------
 find_kbuild() {
     local kver="$1"
-    local candidates=(
-        "/lib/modules/${kver}/build"        # Arch, openSUSE y mayoría de distros
-        "/usr/src/linux-headers-${kver}"    # Debian / Ubuntu
-        "/usr/src/kernels/${kver}"          # Fedora / RHEL / CentOS
-        "/usr/src/linux-${kver}"            # Gentoo
-    )
+    local candidates
+    # KBUILD_CANDIDATES permite inyectar rutas alternativas en tests.
+    if [[ -v KBUILD_CANDIDATES && "${#KBUILD_CANDIDATES[@]}" -gt 0 ]]; then
+        candidates=("${KBUILD_CANDIDATES[@]}")
+    else
+        candidates=(
+            "/lib/modules/${kver}/build"        # Arch, openSUSE y mayoría de distros
+            "/usr/src/linux-headers-${kver}"    # Debian / Ubuntu
+            "/usr/src/kernels/${kver}"          # Fedora / RHEL / CentOS
+            "/usr/src/linux-${kver}"            # Gentoo
+        )
+    fi
     for path in "${candidates[@]}"; do
         if [[ -d "$path" && -f "${path}/Makefile" ]]; then
             echo "$path"
@@ -135,7 +141,7 @@ download_bt_headers() {
                 ok=1
                 break
             fi
-            echo "       WARN: fallo ${url}"
+            echo "       WARN: fallo ${url}" >&2
         done
         if [[ $ok -eq 0 ]]; then
             echo "ERROR: No se pudo descargar ${header} desde ninguna fuente conocida."
@@ -164,12 +170,18 @@ generate_autoconf() {
         echo "       Prueba: zcat /proc/config.gz, /boot/config-${kver} o ${kbuild}/.config"
         exit 1
     fi
+    local out_dir="${kbuild}/include/generated"
+    mkdir -p "$out_dir" || {
+        echo "ERROR: No se puede crear ${out_dir}."
+        echo "       Verifica los permisos del paquete de headers del kernel."
+        exit 1
+    }
     { [[ $cfg_zcat -eq 1 ]] && zcat "$cfg_file" || cat "$cfg_file"; } | awk '
         /^CONFIG_.*=y$/ { gsub(/=y$/, ""); print "#define " $0 " 1" }
         /^CONFIG_.*=m$/ { gsub(/=m$/, ""); print "#define " $0 " 1" }
         /^CONFIG_.*=[0-9]/ { gsub(/=/, " "); print "#define " $0 }
         /^CONFIG_.*=".*"/ { n=index($0,"="); print "#define " substr($0,1,n-1) " " substr($0,n+1) }
-    ' > "${kbuild}/include/generated/autoconf.h"
+    ' > "${out_dir}/autoconf.h"
 }
 
 # ---------------------------------------------------------------------------
@@ -244,6 +256,9 @@ restart_bluetooth() {
 # ===========================================================================
 
 main() {
+    # --- Verificar root ---
+    [[ $EUID -eq 0 ]] || { echo "ERROR: este script debe ejecutarse como root (sudo)."; exit 1; }
+
     # --- Localizar headers del kernel ---
     KBUILD=$(find_kbuild "$KVER") || {
         echo "ERROR: Headers del kernel no encontrados para ${KVER}."
@@ -294,7 +309,7 @@ EOF
     KBUILD_CC=$(detect_compiler "$KBUILD")
     echo "==> Compilando con ${KBUILD_CC}..."
     if [[ "$KBUILD_CC" == "clang" ]]; then
-        make -C "${BUILD_DIR}" CC=clang LD=ld.lld
+        make -C "${BUILD_DIR}" LLVM=1 LLVM_IAS=1
     else
         make -C "${BUILD_DIR}" CC=gcc
     fi
@@ -306,7 +321,15 @@ EOF
     DEST="/lib/modules/${KVER}/kernel/drivers/bluetooth"
     install_module "${BUILD_DIR}/btusb.ko" "$DEST" "$KVER"
 
-    # --- Reiniciar bluetooth ---
+    # --- Recargar módulo btusb ---
+    echo "==> Recargando módulo btusb..."
+    if modprobe -r btusb 2>/dev/null; then
+        modprobe btusb
+    else
+        echo "    AVISO: El módulo btusb está en uso; el nuevo módulo se activará tras reiniciar."
+    fi
+
+    # --- Reiniciar servicio bluetooth ---
     echo "==> Reiniciando bluetooth..."
     restart_bluetooth
 

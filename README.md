@@ -1,8 +1,8 @@
-# btusb patch — MediaTek Bluetooth USB 04ca:3807 (MT7921) not working on Linux
+# btusb patch — Lite-On / MediaTek Bluetooth 04ca:3807 (MT7922) not working on Linux
 
-**Fix for MediaTek Bluetooth adapter `04ca:3807` not recognized by the Linux kernel.**
+**Fix for Lite-On Bluetooth adapter `04ca:3807` (MediaTek MT7922) not recognized by the Linux kernel.**
 
-This repository provides an out-of-tree kernel module that patches `btusb` to add the missing USB ID entry for the MediaTek MT7921 Bluetooth adapter (`04ca:3807`). The device is not listed in the upstream `btusb` driver table and remains unrecognized on recent kernel versions.
+This repository provides an out-of-tree kernel module that patches `btusb` to add the missing USB ID entry for the Lite-On USB Bluetooth adapter `04ca:3807`, which uses a MediaTek MT7922 chip. The device is not listed in the upstream `btusb` driver table and remains unrecognized on recent kernel versions.
 
 Includes automatic recompilation via a **pacman hook** after every kernel update.
 
@@ -10,7 +10,7 @@ Includes automatic recompilation via a **pacman hook** after every kernel update
 
 ## The problem
 
-If you have a MediaTek Bluetooth adapter with USB ID `04ca:3807` and Bluetooth does not work on Linux, you are likely hitting this bug:
+If you have a Bluetooth adapter with USB ID `04ca:3807` (shown as **Lite-On Technology Corp.** in `lsusb`) and Bluetooth does not work on Linux, you are likely hitting this bug:
 
 ```
 $ lsusb
@@ -22,7 +22,7 @@ $ dmesg | grep -i bluetooth
 
 The device ID `0x04ca 0x3807` is missing from the `btusb` driver's USB ID table in the official kernel tree. As of kernel 7.x, this entry has still **not been merged upstream**.
 
-**Affected hardware:** laptops and desktops with MediaTek MT7921 Bluetooth (USB form factor), commonly found in ASUS, Lenovo, HP, and Acer models shipping with AMD or Intel platforms.
+**Affected hardware:** laptops and desktops with a Lite-On USB Bluetooth adapter (MediaTek MT7922 chip), commonly found in ASUS, Lenovo, HP, and Acer models shipping with AMD or Intel platforms.
 
 **Affected distros:** any Linux distro running a kernel without this entry — Arch Linux, Manjaro, CachyOS, EndeavourOS, Ubuntu, Fedora, and others.
 
@@ -33,7 +33,7 @@ The device ID `0x04ca 0x3807` is missing from the `btusb` driver's USB ID table 
 The missing entry is added to `btusb.c`:
 
 ```c
-/* MediaTek MT7921 */
+/* Lite-On / MediaTek MT7922 */
 { USB_DEVICE(0x04ca, 0x3807), .driver_info = BTUSB_MEDIATEK |
   BTUSB_WIDEBAND_SPEECH },
 ```
@@ -60,9 +60,12 @@ If a flavor-specific tag is not available, the script automatically falls back t
 
 ## Requirements
 
-- Arch Linux or derivative (pacman-based)
+- Any Linux distribution
+- Root access (`sudo`)
 - Kernel headers installed (see table above)
-- `curl`, `zstd`, `make`, `gcc` or `clang`
+- `curl`, `zstd`, `make`, `gcc` or `clang` (or a full LLVM toolchain for LLVM-built kernels)
+
+> **Pacman hook:** automatic recompilation is Arch-specific. On Debian/Ubuntu, Fedora, or other distros, run `sudo ./install-btusb-patch.sh` manually after each kernel update, or wire up an equivalent trigger via your distro's package manager hooks.
 
 ---
 
@@ -110,47 +113,44 @@ After this, every time a supported `*-headers` package is upgraded, pacman will 
 
 ---
 
+## Restore the original module (automated)
+
+```bash
+sudo ./uninstall-btusb-patch.sh
+```
+
+The script locates the backup created during installation (`btusb.<ext>.orig`), restores it, runs `depmod`, reloads the module, and restarts the bluetooth service.
+
+---
+
 ## Project structure
 
 ```
 mediatek-fix/
-├── btusb.c                  # Patched btusb driver
-├── compat.h                 # Compatibility shims across kernel versions
-├── Makefile                 # Out-of-tree module build
-├── apply-patch.sh           # Manual installation script
-├── install-btusb-patch.sh   # Script called by the pacman hook
-└── btusb-patch.hook         # Pacman hook definition
+├── btusb.c                     # Patched btusb driver
+├── compat.h                    # Compatibility shims across kernel versions
+├── Makefile                    # Out-of-tree module build
+├── apply-patch.sh              # Manual installation entry point
+├── install-btusb-patch.sh      # Core install script (also called by pacman hook)
+├── uninstall-btusb-patch.sh    # Restore the original module from backup
+└── btusb-patch.hook            # Pacman hook definition
 ```
 
 The headers `btintel.h`, `btbcm.h`, `btrtl.h`, and `btmtk.h` are downloaded at build time from the matching kernel source repository and are not included in this repo.
 
----
-
-## Restore the original module
-
-```bash
-KVER=$(uname -r)
-DEST="/lib/modules/${KVER}/kernel/drivers/bluetooth"
-
-# Detect the extension used during install
-for ext in ko.zst ko.xz ko.gz ko; do
-    [[ -f "${DEST}/btusb.${ext}.orig" ]] && ORIG_EXT="$ext" && break
-done
-
-sudo cp "${DEST}/btusb.${ORIG_EXT}.orig" "${DEST}/btusb.${ORIG_EXT}"
-sudo depmod -a
-sudo systemctl restart bluetooth
-```
 
 ---
 
 ## Related searches
 
 - `04ca:3807` bluetooth not working linux
-- MediaTek MT7921 bluetooth linux fix
+- Lite-On Technology Corp bluetooth linux
+- Lite-On 04ca 3807 bluetooth not recognized
+- MediaTek MT7922 bluetooth linux fix
+- MediaTek MT7922A bluetooth linux fix
 - btusb missing USB ID 04ca 3807
 - Bluetooth adapter not recognized Arch Linux
 - btusb out-of-tree module patch kernel 6.x 7.x
-- MediaTek bluetooth `lsusb` shows device but not connected
-- `hciconfig` no devices found MediaTek
-- Lite-On Technology Corp bluetooth linux driver
+- Lite-On bluetooth `lsusb` shows device but not connected
+- `hciconfig` no devices found Lite-On MediaTek
+- 04ca:3807 btusb driver_info BTUSB_MEDIATEK

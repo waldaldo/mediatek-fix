@@ -4,6 +4,13 @@ Operation = Upgrade
 Type = Package
 Target = linux-cachyos-headers
 Target = linux-cachyos-rc-headers
+Target = linux-cachyos-bore-headers
+Target = linux-cachyos-lto-headers
+Target = linux-cachyos-bore-lto-headers
+Target = linux-cachyos-server-headers
+Target = linux-cachyos-echo-headers
+Target = linux-cachyos-tt-headers
+Target = linux-cachyos-deckify-headers
 Target = linux-zen-headers
 Target = linux-lqx-headers
 Target = linux-headers
@@ -11,6 +18,9 @@ Target = linux-lts-headers
 Target = linux-hardened-headers
 Target = linux-rt-headers
 Target = linux-rt-lts-headers
+Target = linux-amd-headers
+Target = linux-xanmod-headers
+Target = linux-xanmod-lts-headers
 
 [Action]
 Description = Recompilando módulo btusb parcheado...
