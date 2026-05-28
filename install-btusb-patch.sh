@@ -27,6 +27,10 @@ if [[ "${BTUSB_TESTING:-}" != "1" ]]; then
     trap 'rm -rf "$BUILD_DIR"' EXIT
 fi
 
+# Carga utilidades compartidas siempre (también en modo test).
+# shellcheck source=lib-btusb.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-btusb.sh"
+
 # ---------------------------------------------------------------------------
 # Localiza el directorio de build del kernel en varias rutas estándar.
 # Salida: ruta al directorio de headers del kernel, o vacío si no se encuentra.
@@ -35,7 +39,11 @@ find_kbuild() {
     local kver="$1"
     local candidates
     # KBUILD_CANDIDATES permite inyectar rutas alternativas en tests.
+    # Si se provee desde el entorno,无声ly usa esas rutas sin auditoría.
     if [[ -v KBUILD_CANDIDATES && "${#KBUILD_CANDIDATES[@]}" -gt 0 ]]; then
+        if [[ "${BTUSB_TESTING:-}" != "1" ]]; then
+            echo "    INFO: usando KBUILD_CANDIDATES del entorno: ${KBUILD_CANDIDATES[*]}" >&2
+        fi
         candidates=("${KBUILD_CANDIDATES[@]}")
     else
         candidates=(
@@ -45,12 +53,18 @@ find_kbuild() {
             "/usr/src/linux-${kver}"            # Gentoo
         )
     fi
+    local found=""
     for path in "${candidates[@]}"; do
         if [[ -d "$path" && -f "${path}/Makefile" ]]; then
-            echo "$path"
-            return 0
+            found="$path"
+            break
         fi
     done
+    if [[ -n "$found" ]]; then
+        echo "$found"
+        return 0
+    fi
+    echo "    paths checked: ${candidates[*]}" >&2
     return 1
 }
 
@@ -81,9 +95,7 @@ suggest_headers_pkg() {
 # ---------------------------------------------------------------------------
 build_url_candidates() {
     local kver="$1"
-    local base base_mm rc_tag
-    base=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')
-    base_mm=$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\)\..*/\1/')
+    local rc_tag
     rc_tag=$(echo "$kver" | sed -n 's/^\([0-9]*\.[0-9]*\)\.[0-9]*-\(rc[0-9]*\).*/v\1-\2/p')
 
     URL_CANDIDATES=()
@@ -94,36 +106,31 @@ build_url_candidates() {
     if echo "$kver" | grep -qE '\-cachyos(-rc)?'; then
         FLAVOR="cachyos"
         local ctag
-        [[ -n "$rc_tag" ]] && ctag="${rc_tag}-cachyos" || ctag="v${base}-cachyos"
+        [[ -n "$rc_tag" ]] && ctag="${rc_tag}-cachyos" \
+            || ctag="v$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')-cachyos"
         URL_CANDIDATES+=("https://raw.githubusercontent.com/CachyOS/linux/${ctag}/drivers/bluetooth")
 
     elif echo "$kver" | grep -q '\-zen'; then
         FLAVOR="zen"
-        local ztag
-        ztag=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(zen[0-9]*\)-.*/v\1-\2/')
-        URL_CANDIDATES+=("https://raw.githubusercontent.com/zen-kernel/zen-kernel/${ztag}/drivers/bluetooth")
+        URL_CANDIDATES+=("https://raw.githubusercontent.com/zen-kernel/zen-kernel/$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(zen[0-9]*\)-.*/v\1-\2/')/drivers/bluetooth")
 
     elif echo "$kver" | grep -q '\-lqx'; then
         FLAVOR="lqx"
-        local ltag
-        ltag=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(lqx[0-9]*\)-.*/v\1-\2/')
-        URL_CANDIDATES+=("https://raw.githubusercontent.com/zen-kernel/zen-kernel/${ltag}/drivers/bluetooth")
+        URL_CANDIDATES+=("https://raw.githubusercontent.com/zen-kernel/zen-kernel/$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)-\(lqx[0-9]*\)-.*/v\1-\2/')/drivers/bluetooth")
 
     elif echo "$kver" | grep -q '\.hardened'; then
         FLAVOR="hardened"
-        local htag
-        htag=$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)\.\(hardened[0-9]*\)-.*/v\1-\2/')
-        URL_CANDIDATES+=("https://raw.githubusercontent.com/anthraxx/linux-hardened/${htag}/drivers/bluetooth")
+        URL_CANDIDATES+=("https://raw.githubusercontent.com/anthraxx/linux-hardened/$(echo "$kver" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\)\.\(hardened[0-9]*\)-.*/v\1-\2/')/drivers/bluetooth")
     fi
 
     # --- Upstream siempre disponible como fallback ---
 
     # torvalds/linux: tagea vX.Y (sin patch level) o vX.Y-rcN para RCs
-    local torvalds_tag="${rc_tag:-v${base_mm}}"
+    local torvalds_tag="${rc_tag:-v$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\)\..*/\1/')}"
     URL_CANDIDATES+=("https://raw.githubusercontent.com/torvalds/linux/${torvalds_tag}/drivers/bluetooth")
 
     # gregkh/linux: estable con patch level completo (vX.Y.Z)
-    local gregkh_tag="${rc_tag:-v${base}}"
+    local gregkh_tag="${rc_tag:-v$(echo "$kver" | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')}"
     URL_CANDIDATES+=("https://raw.githubusercontent.com/gregkh/linux/${gregkh_tag}/drivers/bluetooth")
 }
 
@@ -133,21 +140,39 @@ build_url_candidates() {
 # ---------------------------------------------------------------------------
 download_bt_headers() {
     local dest="$1"
+    local -A results=()  # header → final path on success
+    local pids=()
+
+    download_one() {
+        local header="$1" dest="$2" url
+        local tmp
+        tmp=$(mktemp "${dest}/${header}.XXXXXX")
+        for url in "${URL_CANDIDATES[@]}"; do
+            if curl -sSf --max-time 30 "${url}/${header}" -o "$tmp" 2>/dev/null; then
+                mv "$tmp" "${dest}/${header}"
+                return 0
+            fi
+            echo "       WARN: fallo ${header} <- ${url}" >&2
+        done
+        rm -f "$tmp"
+        return 1
+    }
+
     for header in btintel.h btbcm.h btrtl.h btmtk.h; do
         echo "    -> ${header}"
-        local ok=0
-        for url in "${URL_CANDIDATES[@]}"; do
-            if curl -sSf --max-time 30 "${url}/${header}" -o "${dest}/${header}" 2>/dev/null; then
-                ok=1
-                break
-            fi
-            echo "       WARN: fallo ${url}" >&2
-        done
-        if [[ $ok -eq 0 ]]; then
-            echo "ERROR: No se pudo descargar ${header} desde ninguna fuente conocida."
-            exit 1
-        fi
+        download_one "$header" "$dest" &
+        pids+=($!)
     done
+
+    local failed=0
+    for pid in "${pids[@]}"; do
+        wait "$pid" || ((failed++))
+    done
+
+    if [[ $failed -gt 0 ]]; then
+        echo "ERROR: falló la descarga de ${failed} header(s)."
+        exit 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -181,7 +206,12 @@ generate_autoconf() {
         /^CONFIG_.*=m$/ { gsub(/=m$/, ""); print "#define " $0 " 1" }
         /^CONFIG_.*=[0-9]/ { gsub(/=/, " "); print "#define " $0 }
         /^CONFIG_.*=".*"/ { n=index($0,"="); print "#define " substr($0,1,n-1) " " substr($0,n+1) }
-    ' > "${out_dir}/autoconf.h"
+    ' > "${out_dir}/autoconf.h" || exit 1
+
+    if [[ ! -s "${out_dir}/autoconf.h" ]]; then
+        echo "ERROR: autoconf.h está vacío — ningún CONFIG_ reconocido en ${cfg_file}."
+        exit 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -189,25 +219,15 @@ generate_autoconf() {
 # ---------------------------------------------------------------------------
 detect_compiler() {
     local kbuild="$1"
-    # La cabecera compile.h registra el compilador exacto usado en el build
-    if grep -q 'clang' "${kbuild}/include/generated/compile.h" 2>/dev/null; then
+    # Verifica que la palabra "clang" aparezca como compilador registrado,
+    # no como substring de otro texto.
+    if grep -q '\bclang\b' "${kbuild}/include/generated/compile.h" 2>/dev/null; then
         echo "clang"
-    elif grep -q 'clang' /proc/version 2>/dev/null; then
+    elif grep -q '\bclang\b' /proc/version 2>/dev/null; then
         echo "clang"
     else
         echo "gcc"
     fi
-}
-
-# ---------------------------------------------------------------------------
-# Detecta la extensión del módulo btusb instalado (zst, xz, gz, o sin comprimir).
-# ---------------------------------------------------------------------------
-detect_module_ext() {
-    local dest="$1"
-    for ext in ko.zst ko.xz ko.gz ko; do
-        [[ -f "${dest}/btusb.${ext}" ]] && echo "$ext" && return 0
-    done
-    echo "ko"
 }
 
 # ---------------------------------------------------------------------------
@@ -236,19 +256,6 @@ install_module() {
     esac
 
     depmod -a "$kver"
-}
-
-# ---------------------------------------------------------------------------
-# Reinicia el servicio bluetooth usando el init system disponible.
-# ---------------------------------------------------------------------------
-restart_bluetooth() {
-    if command -v systemctl &>/dev/null; then
-        systemctl restart bluetooth 2>/dev/null || true
-    elif command -v rc-service &>/dev/null; then
-        rc-service bluetooth restart 2>/dev/null || true
-    elif command -v service &>/dev/null; then
-        service bluetooth restart 2>/dev/null || true
-    fi
 }
 
 # ===========================================================================
@@ -318,8 +325,7 @@ EOF
 
     # --- Instalar ---
     echo "==> Instalando btusb.ko..."
-    DEST="/lib/modules/${KVER}/kernel/drivers/bluetooth"
-    install_module "${BUILD_DIR}/btusb.ko" "$DEST" "$KVER"
+    install_module "${BUILD_DIR}/btusb.ko" "$(btusb_dest "$KVER")" "$KVER"
 
     # --- Recargar módulo btusb ---
     echo "==> Recargando módulo btusb..."
@@ -331,7 +337,9 @@ EOF
 
     # --- Reiniciar servicio bluetooth ---
     echo "==> Reiniciando bluetooth..."
-    restart_bluetooth
+    if ! restart_bluetooth; then
+        echo "    AVISO: No se pudo reiniciar el servicio bluetooth. Verifica manualmente."
+    fi
 
     echo "==> Listo."
 }

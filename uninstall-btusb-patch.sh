@@ -9,13 +9,18 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Carga utilidades compartidas.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-btusb.sh
+source "${SCRIPT_DIR}/lib-btusb.sh"
+
 KVER=$(uname -r)
-DEST="/lib/modules/${KVER}/kernel/drivers/bluetooth"
+DEST="$(btusb_dest "$KVER")"
 
 echo "==> Buscando backup en ${DEST}..."
 
 ORIG_EXT=""
-for ext in ko.zst ko.xz ko.gz ko; do
+for ext in "${BTUSB_EXTENSIONS[@]}"; do
     if [[ -f "${DEST}/btusb.${ext}.orig" ]]; then
         ORIG_EXT="$ext"
         break
@@ -42,12 +47,8 @@ else
 fi
 
 echo "==> Reiniciando bluetooth..."
-if command -v systemctl &>/dev/null; then
-    systemctl restart bluetooth 2>/dev/null || true
-elif command -v rc-service &>/dev/null; then
-    rc-service bluetooth restart 2>/dev/null || true
-elif command -v service &>/dev/null; then
-    service bluetooth restart 2>/dev/null || true
+if ! restart_bluetooth; then
+    echo "    AVISO: No se pudo reiniciar el servicio bluetooth. Verifica manualmente."
 fi
 
 echo "==> Módulo original restaurado para kernel ${KVER}."
